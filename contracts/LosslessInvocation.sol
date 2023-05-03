@@ -16,6 +16,7 @@ contract VotingInvocation {
     string public metaevidenceURI;
 
     mapping(uint256 => uint256) public reportIDToDisputeID;
+    mapping(uint256 => bool) public executedReports;
 
     constructor(
         address _governor,
@@ -30,7 +31,10 @@ contract VotingInvocation {
     }
 
     modifier onlyGovernor() {
-        require(msg.sender == governor, "Only the governor can call this function.");
+        require(
+            msg.sender == governor,
+            "Only the governor can call this function."
+        );
         _;
     }
 
@@ -46,47 +50,97 @@ contract VotingInvocation {
         numberOfJurors = _numberOfJurors;
     }
 
-    function setMetaevidenceURI(string memory _metaevidenceURI) public onlyGovernor {
+    function setMetaevidenceURI(
+        string memory _metaevidenceURI
+    ) public onlyGovernor {
         metaevidenceURI = _metaevidenceURI;
     }
 
+    //events
+    event DisputeCreated(uint256 reportID, uint256 disputeID);
+    event VoteExecuted(uint256 reportID);
+
+    //view functions
+    function getDisputeID(uint256 _reportID) public view returns (uint256) {
+        return reportIDToDisputeID[_reportID];
+    }
+
+    function getGovernor() public view returns (address) {
+        return governor;
+    }
+
+    function getLosslessGovernance() public view returns (LosslessGovernance) {
+        return losslessGovernance;
+    }
+
+    function getArbitrableProxy() public view returns (IArbitrableProxy) {
+        return arbitrableProxy;
+    }
+
+    function getKlerosLiquid() public view returns (KlerosLiquid) {
+        return klerosLiquid;
+    }
+
+    function getCourtID() public view returns (uint256) {
+        return courtID;
+    }
+
+    function getNumberOfJurors() public view returns (uint256) {
+        return numberOfJurors;
+    }
+
+    function getMetaevidenceURI() public view returns (string memory) {
+        return metaevidenceURI;
+    }
+
+    function isReportExecuted(uint256 _reportID) public view returns (bool) {
+        return executedReports[_reportID];
+    }
+
+    //write functions
     function invokeVote(uint256 _reportID) public payable {
-        require(reportIDToDisputeID[_reportID] == 0, "Dispute already created for this report.");
+        require(
+            reportIDToDisputeID[_reportID] == 0,
+            "Dispute already created for this report."
+        );
 
         bytes memory extraData = abi.encodePacked(courtID, numberOfJurors);
-        uint256 arbitrationCost = klerosLiquid.arbitrationCost(extraData);
 
-        require(msg.value >= arbitrationCost, "Not enough funds provided for arbitration.");
+        uint256 disputeID = arbitrableProxy.createDispute{
+            value: arbitrationCost
+        }(extraData, metaevidenceURI, 2);
 
-        uint256 disputeID = arbitrableProxy.createDispute{value: arbitrationCost}(
-            extraData,
-            metaevidenceURI,
-            2
-        );
+        emit DisputeCreated(_reportID, disputeID);
 
         reportIDToDisputeID[_reportID] = disputeID;
 
+        //Refund extra amounts beyond the arbitration cost.
+        uint256 arbitrationCost = klerosLiquid.arbitrationCost(extraData);
         if (msg.value > arbitrationCost) {
             payable(msg.sender).transfer(msg.value - arbitrationCost);
         }
     }
 
-    function checkInvocationCriteria(uint256 _reportID) public view returns (bool) {
+    function executeVote(uint256 _reportID) public {
+        require(!executedReports[_reportID], "Report already executed.");
+
         uint256 disputeID = reportIDToDisputeID[_reportID];
         require(disputeID != 0, "Dispute not found for this report.");
 
-        (uint256 winningChoice, uint256[] memory counts, bool tied) = klerosLiquid.getVoteCounter(disputeID, 0);
+        //Polls for the provisional results of the first round of the arbitration case
+        (
+            uint256 winningChoice,
+            uint256[] memory counts,
+            bool tied
+        ) = klerosLiquid.getVoteCounter(disputeID, 0);
 
-        return (
-            winningChoice == 1 &&
-            !tied &&
-            counts[1] == numberOfJurors
+        require(
+            winningChoice == 1 && !tied && counts[1] == numberOfJurors,
+            "Invocation criteria not fulfilled."
         );
-    }
 
-    function executeVote(uint256 _reportID) public {
-        require(checkInvocationCriteria(_reportID), "Invocation criteria not fulfilled.");
-
+        executedReports[_reportID] = true;
         losslessGovernance.tokenOwnersVote(_reportID, true);
+        emit VoteExecuted(_reportID);
     }
 }
